@@ -1,148 +1,83 @@
 import json
 import os
-from xarray_multiscale import multiscale, windowed_mean,windowed_mode
+from typing import Literal, Tuple, Union
+from distributed import wait
+from xarray_multiscale import multiscale, windowed_mean, windowed_mode
+from xarray_multiscale.reducers import windowed_mode_countless, windowed_mode_scipy
 import dask.array as da
 import zarr
 import cluster_wrapper as cw
 import time
-import copy 
+from numcodecs.abc import Codec
 import numpy as np
-from dask.array.core import slices_from_chunks
+from dask.array.core import slices_from_chunks, normalize_chunks
 from dask.distributed import Client
 from numcodecs import Zstd
-
-src_store = zarr.NestedDirectoryStore('')
+from toolz import partition_all
+src_store = zarr.NestedDirectoryStore('/nrs/cellmap/zubovy/liver_zon_1_predictions/mito_membrane_postprocessed.zarr/inference')
 src_root = zarr.open_group(store=src_store, mode = 'a')
 
-####################################
-def create_multiscale(z_root, chunks, client, num_workers, comp):
-    # store original array in a new .zarr file as an arr_name scale
-    z_attrs = copy.deepcopy(dict(z_root.attrs)) #add_multiscale_metadata(z_root)
-    #optimal_chunksize =  optimal_dask_chunksize(z_root['s0'], 30000)
-    # sn_data = da.from_array(src_root[arr_name], chunks = optimal_chunksize)
-    # dataset = dest_root.create_dataset(arr_name, shape=src_root[arr_name].shape, chunks=src_root[arr_name].chunks, dtype=src_root[arr_name].dtype)
-    # da.store(sn_data, dataset, lock = False)
-    print(list(z_root.attrs))
-    print(list(z_root.array_keys(recurse = True)))
-    i = 0
-    s0 = list(z_root.attrs['multiscales'][0]['datasets'][i]['coordinateTransformations'][0]['scale'])
-    tr0 = list(z_root.attrs['multiscales'][0]['datasets'][i]['coordinateTransformations'][1]['translation'])
-    b = 1
+def upscale_slice(slc: slice, factor: int):
+    return slice(slc.start * factor, slc.stop * factor, slc.step)
+
+def downsample_save_chunk_mode(
+        source: zarr.Array, 
+        dest: zarr.Array, 
+        out_slices: Tuple[slice, ...],
+        downsampling_factors: Tuple[int, ...]):
     
-    z_arr_shape = z_root["s0"].shape
-    while all(x > 64 for x in z_arr_shape):#(z_arr_shape > tuple(i*b for i in (64,64,64))):
-        print(i)
-        if i != 0:
+    in_slices = tuple(upscale_slice(out_slice, fact) for out_slice, fact in zip(out_slices, downsampling_factors))
+    source_data = source[in_slices]
+    # only downsample source_data if it is not all 0s
+    if not (source_data == 0).all():
+        ds_data = ds_data = windowed_mode(source_data, window_size=downsampling_factors)
+        dest[out_slices] = ds_data
+    return 1
 
-            opt_chunksize = optimal_dask_chunksize(z_root[f's{i-1}'], chunks, 2000)
-            print(f"main array, opt chunk_size: {opt_chunksize}")
-            sn_data = da.from_array(z_root[f's{i-1}'], chunks = opt_chunksize)
-            res_level = multiscale(sn_data, windowed_mode, 2, chunks = opt_chunksize)[1]
+def create_multiscale(z_root: zarr.Group, out_chunks: Tuple[int, ...], client: Client, num_workers: int, comp: Codec):
+    # store original array in a new .zarr file as an arr_name scale
+    z_attrs = z_root.attrs.asdict() 
+    base_scale = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][0]['scale']
+    base_trans = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][1]['translation']
+    num_levels = 8
+    client.cluster.scale(num_workers)
+    for level in range(1, num_levels - 1):
+        print(f'{level=}')
+        source_arr = z_root[f's{level-1}']
+        source_darr = da.from_array(source_arr, chunks=(-1,-1,-1))
+        res_level_template = multiscale(source_darr, windowed_mode, 2)[1].data
 
-            start_time = time.time()
-            dataset = z_root.create_dataset(f's{i}', shape=res_level.shape, chunks=chunks, dtype=res_level.dtype, compressor=comp, dimension_separator='/')
+        start_time = time.time()
+        dest_arr = z_root.require_dataset(
+            f's{level}', 
+            shape=res_level_template.shape, 
+            chunks=out_chunks, 
+            dtype=res_level_template.dtype, 
+            compressor=comp, 
+            dimension_separator='/',
+            fill_value=0,
+            exact=True)
+        
+        assert dest_arr.chunks == out_chunks
+        out_slices = slices_from_chunks(normalize_chunks(out_chunks, shape=dest_arr.shape))
+        # break the slices up into batches, to make things easier for the dask scheduler
+        out_slices_partitioned = tuple(partition_all(100000, out_slices))
+        for idx, part in enumerate(out_slices_partitioned):
+            print(f'{idx + 1} / {len(out_slices_partitioned)}')
+            start = time.time()
+            fut = client.map(lambda v: downsample_save_chunk_mode(source_arr, dest_arr, v, (2,2,2)), part)
+            print(f'Submitted {len(part)} tasks to the scheduler in {time.time()- start}s')
+            # wait for all the futures to complete
+            result = wait(fut)
+            print(f'Completed {len(part)} tasks in {time.time() - start}s')
+        sn = [dim * pow(2, level) for dim in base_scale]
+        trn = [(dim * (pow(2, level - 1) -0.5))+tr for (dim, tr) in zip(base_scale, base_trans)]
 
-
-            slab_size = (106, int(sn_data.shape[1] /16), -1)
-            slices_src = slices_from_chunks(sn_data.rechunk(slab_size).chunks)
-                        
-            slab_reduced_size = (int(slab_size[0] / 2), int(slab_size[1] / 2), -1)
-            slices_target = slices_from_chunks(res_level.data.rechunk(slab_reduced_size).chunks)   
-            print(len(list(zip(slices_src, slices_target))))
-            
-            for batch in batch_list(list(zip(slices_src, slices_target)), 10):
-                
-                client.cluster.scale(num_workers)
-
-                futures = []
-                for (sl_src, sl_target) in batch:
-
-                    darr_in = sn_data[sl_src]
-                    opt_chunksize_slab = optimal_dask_chunksize(darr_in, chunks, 2000, 2)
-                                    
-                    res_level_slab = multiscale(darr_in, windowed_mode, 2, chunks = opt_chunksize_slab)[1]
-                    futures.append(da.store(res_level_slab.data, dataset, regions=sl_target, lock=False, return_stored=False, compute=False))
-                
-                client.compute(futures, sync=True)
-            
-                client.cluster.scale(0)
-            
-            # client.cluster.scale(num_workers)
-            # da.store(res_level.data, dataset, lock=False)
-            # client.cluster.scale(0)
-
-            
-            print(f"computation time, s_{i}: {time.time() - start_time}")
-            z_arr_shape = res_level.shape
-
-
-            sn = [dim * pow(2, i) for dim in s0]
-            trn = [(dim * (pow(2, i - 1) -0.5))+tr for (dim, tr) in zip(s0, tr0)]
-
-            print(trn)
-            z_attrs['multiscales'][0]['datasets'].append({'coordinateTransformations': [{"type": "scale",
-                        "scale": sn}, {"type" : "translation", "translation" : trn}],
-                        'path': f's{i}'})
-        i += 1
+        z_attrs['multiscales'][0]['datasets'].append({'coordinateTransformations': [{"type": "scale",
+                    "scale": sn}, {"type" : "translation", "translation" : trn}],
+                    'path': f's{level}'})
     
     z_root.attrs['multiscales'] = z_attrs['multiscales']
-
-# def optimal_dask_chunksize(arr, target_chunks, max_dask_chunk_num):
-#     #calculate number of chunks within a zarr array.
-#     chunk_dims = target_chunks
-#     chunk_num= np.prod(arr.shape)/np.prod(chunk_dims) 
-    
-#     # 1. Scale up chunk size (chunksize approx = 1GB)
-#     scaling = 1
-#     while np.prod(chunk_dims)*arr.itemsize*pow(scaling, 3)/pow(10, 6) < 700 :
-#         scaling += 1
-
-#     # 3. Number of chunks should be < 50000
-#     while (chunk_num / pow(scaling,3)) > max_dask_chunk_num:
-#         scaling +=1
-
-#     # 2. Make sure that chunk dims < array dims
-#     while any([ch_dim > 3*arr_dim/4 for ch_dim, arr_dim in zip(tuple(dim * scaling for dim in chunk_dims), arr.shape)]):#np.prod(chunks)*arr.itemsize*pow(scaling,3) > arr.nbytes:
-#         scaling -=1
-
-#     if scaling == 0:
-#         scaling = 1
-#     return tuple(dim * scaling for dim in chunk_dims) 
-
-def optimal_dask_chunksize(arr, target_chunks, max_dask_chunk_num, scale_dim=3):
-    #calculate number of chunks within a zarr array.
-    chunk_dims = target_chunks
-    chunk_num= np.prod(arr.shape)/np.prod(chunk_dims) 
-    
-    # 1. Scale up chunk size (chunksize approx = 1GB)
-    scaling = 1
-    while np.prod(chunk_dims)*arr.itemsize*pow(scaling, 3)/pow(10, 6) < 700 :
-        scaling += 1
-    
-    print(scaling)
-
-    # 2. Number of chunks should be < 50000
-    while (chunk_num / pow(scaling,3)) > max_dask_chunk_num:
-        scaling +=1
-        
-    print(scaling)
-
-    # 3. Make sure that chunk dims < array dims
-    while any([ch_dim > 3*arr_dim/4 for ch_dim, arr_dim in zip(tuple(dim * scaling for dim in chunk_dims[-scale_dim:]), arr.shape[-scale_dim:])]):#np.prod(chunks)*arr.itemsize*pow(scaling,3) > arr.nbytes:
-        scaling -=1
-        
-    print(scaling)
-
-    if scaling == 0:
-        scaling = 1
-            
-    #anisotropic scaling
-    scaling_dims = np.ones(len(chunk_dims), dtype=int)
-    
-    scaling_dims[-scale_dim:] = scaling
-    print(scaling_dims)
-        
-    return tuple(dim * scale_dim for dim, scale_dim  in zip(chunk_dims, scaling_dims)) 
     
 
 def add_multiscale_metadata(dest_root):
@@ -160,18 +95,25 @@ def add_multiscale_metadata(dest_root):
     z_attrs['multiscales'][0]['name'] = dest_root.name
     return z_attrs
 
-def batch_list(arr, n=1):
-    l = len(arr)
-    for ndx in range(0, l, n):
-        yield arr[ndx:min(ndx + n, l)]
-
 if __name__ == '__main__':
     # store_multiscale = cw.cluster_compute("local")(create_multiscale)
     # store_multiscale(src_root,(64, 64, 64),  Zstd(level=6))
-    
-    client = Client(cw.get_cluster("lsf", 60))
-    text_file = open(os.path.join(os.getcwd(), "dask_dashboard_link" + ".txt"), "w")
-    text_file.write(str(client.dashboard_link))
-    text_file.close()
-    create_multiscale(src_root,(106, 106, 106), client, 11, Zstd(level=6))
+    from dask_jobqueue import LSFCluster
+    num_cores = 1
+    cluster = LSFCluster(
+        cores=num_cores,
+        processes=num_cores,
+        memory=f"{15 * num_cores}GB",
+        ncpus=num_cores,
+        mem=15 * num_cores,
+        walltime="48:00",
+        local_directory = "/scratch/$USER/"
+        )
+    client = Client(cluster)
+    with open(os.path.join(os.getcwd(), "dask_dashboard_link" + ".txt"), "w") as text_file:
+        text_file.write(str(client.dashboard_link))
+    print(client.dashboard_link)
+
+    out_chunks = (212,) * 3
+    create_multiscale(z_root=src_root, out_chunks=out_chunks, client=client, num_workers=500, comp=Zstd(level=6))
  

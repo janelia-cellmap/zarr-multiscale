@@ -11,11 +11,12 @@ import time
 from numcodecs.abc import Codec
 import numpy as np
 from dask.array.core import slices_from_chunks, normalize_chunks
-from dask.distributed import Client, wait
+from dask.distributed import Client, wait, LocalCluster
 from numcodecs import Zstd
 from toolz import partition_all
 from dask_jobqueue import LSFCluster
 import click
+import sys
 
 def upscale_slice(slc: slice, factor: int):
     return slice(slc.start * factor, slc.stop * factor, slc.step)
@@ -93,23 +94,32 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
         
 @click.command()
 @click.option('--src','-s',type=click.Path(exists = True),help='Input .zarr file location.')
-@click.option('--workers','-w',default =100,type=int,help = "Number of dask workers")
-@click.option('--data_origin','-do',type=str,help='Different data requires different type of interpolation. Raw fibsem data - use \'raw\', for segmentations - use \'segmentation\'')
-def cli(src, workers, data_origin):
+@click.option('--workers','-w',default=100,type=click.INT,help = "Number of dask workers")
+@click.option('--data_origin','-do',type=click.STRING,help='Different data requires different type of interpolation. Raw fibsem data - use \'raw\', for segmentations - use \'segmentation\'')
+@click.option('--cluster', '-c', default='' ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
+def cli(src, workers, data_origin, cluster):
     
     src_store = zarr.NestedDirectoryStore(src)
     src_root = zarr.open_group(store=src_store, mode = 'a')
     
-    num_cores = 1
-    cluster = LSFCluster(
-        cores=num_cores,
-        processes=num_cores,
-        memory=f"{15 * num_cores}GB",
-        ncpus=num_cores,
-        mem=15 * num_cores,
-        walltime="48:00",
-        local_directory = "/scratch/$USER/"
-        )
+    if cluster == '':
+        print('Did not specify which instance of the dask client to use!')
+        sys.exit(0)
+    elif cluster == 'lsf':
+        num_cores = 1
+        cluster = LSFCluster(
+            cores=num_cores,
+            processes=num_cores,
+            memory=f"{15 * num_cores}GB",
+            ncpus=num_cores,
+            mem=15 * num_cores,
+            walltime="48:00",
+            local_directory = "/scratch/$USER/"
+            )
+    
+    elif cluster == 'local':
+            cluster = LocalCluster()
+    
     client = Client(cluster)
     with open(os.path.join(os.getcwd(), "dask_dashboard_link" + ".txt"), "w") as text_file:
         text_file.write(str(client.dashboard_link))

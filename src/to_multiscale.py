@@ -47,7 +47,6 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
     level = 1
     source_shape = z_root[f's{level-1}'].shape
     while all([dim > 32 for dim in source_shape]):
-    #for level in range(1, num_levels - 1):
         print(source_shape)
         print(f'{level=}')
         source_arr = z_root[f's{level-1}']

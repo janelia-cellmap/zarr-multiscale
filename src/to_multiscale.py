@@ -6,6 +6,7 @@ from xarray_multiscale import multiscale, windowed_mean, windowed_mode
 from xarray_multiscale.reducers import windowed_mode_countless, windowed_mode_scipy
 import dask.array as da
 import zarr
+import cluster_wrapper as cw
 import time
 from numcodecs.abc import Codec
 import numpy as np
@@ -24,13 +25,18 @@ def downsample_save_chunk_mode(
         source: zarr.Array, 
         dest: zarr.Array, 
         out_slices: Tuple[slice, ...],
-        downsampling_factors: Tuple[int, ...]):
+        downsampling_factors: Tuple[int, ...],
+        data_origin: str):
     
     in_slices = tuple(upscale_slice(out_slice, fact) for out_slice, fact in zip(out_slices, downsampling_factors))
     source_data = source[in_slices]
     # only downsample source_data if it is not all 0s
     if not (source_data == 0).all():
-        ds_data = ds_data = windowed_mode(source_data, window_size=downsampling_factors)
+        if data_origin == 'labels':
+            ds_data = windowed_mode(source_data, window_size=downsampling_factors)
+        elif data_origin == 'raw':
+            ds_data = windowed_mean(source_data, window_size=downsampling_factors)
+        
         dest[out_slices] = ds_data
     return 1
 
@@ -46,6 +52,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
     level = 1
     source_shape = z_root[f's{level-1}'].shape
     while all([dim > 32 for dim in source_shape]):
+    #for level in range(1, num_levels - 1):
         print(source_shape)
         print(f'{level=}')
         source_arr = z_root[f's{level-1}']
@@ -73,7 +80,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
         for idx, part in enumerate(out_slices_partitioned):
             print(f'{idx + 1} / {len(out_slices_partitioned)}')
             start = time.time()
-            fut = client.map(lambda v: downsample_save_chunk_mode(source_arr, dest_arr, v, (2,2,2)), part)
+            fut = client.map(lambda v: downsample_save_chunk_mode(source_arr, dest_arr, v, (2,2,2), data_origin), part)
             print(f'Submitted {len(part)} tasks to the scheduler in {time.time()- start}s')
             # wait for all the futures to complete
             result = wait(fut)

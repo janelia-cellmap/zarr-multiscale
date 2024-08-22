@@ -6,7 +6,6 @@ from xarray_multiscale import multiscale, windowed_mean, windowed_mode
 from xarray_multiscale.reducers import windowed_mode_countless, windowed_mode_scipy
 import dask.array as da
 import zarr
-import cluster_wrapper as cw
 import time
 from numcodecs.abc import Codec
 import numpy as np

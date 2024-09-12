@@ -19,7 +19,7 @@ def upscale_slice(slc: slice, factor: int):
     Returns input slice coordinates. 
 
     Args:
-        slc : input slice
+        slc : output slice
         factor : upsampling factor
     Returns:
         slice: source array slice
@@ -65,7 +65,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
         z_root : parent group for source zarr array
         client : Dask client instance
         num_workers : Number of dask workers
-        data_origin : affects which downsampling method is used. Accepts two values: segmentation or raw
+        data_origin : affects which downsampling method is used. Accepts two values: 'segmentation' or 'raw'
     """
     # store original array in a new .zarr file as an arr_name scale
     z_attrs = z_root.attrs.asdict() 

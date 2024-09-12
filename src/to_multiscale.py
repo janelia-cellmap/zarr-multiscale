@@ -26,6 +26,98 @@ def upscale_slice(slc: slice, factor: int):
     """
     return slice(slc.start * factor, slc.stop * factor, slc.step)
 
+@nb.njit
+def index_to_coords(idx: int, shape: Tuple[int]):
+    ndim = len(shape)
+    result = np.zeros(ndim, dtype="int")
+    init = idx
+    strides = make_strides(shape)
+    for region_idx in range(0, ndim - 1):
+        result[region_idx] = init // strides[region_idx]
+        init -= result[region_idx] * strides[region_idx]
+    result[-1] = init
+    return result
+
+
+@nb.njit
+def make_strides(shape: Tuple[int]):
+    ndim = len(shape)
+    result = np.ones(ndim, dtype="int")
+    for d in range(ndim - 2, -1, -1):
+        result[d] = shape[d + 1] * result[d + 1]
+    return result
+
+
+@nb.njit
+def create_stencil(array_shape: Tuple[int], region_shape: Tuple[int]):
+    ndim = len(array_shape)
+
+    result_shape = 1
+    for x in region_shape:
+        result_shape *= x
+
+    array_strides = make_strides(array_shape)
+
+    result = np.zeros(result_shape, dtype="int64")
+
+    for lidx in range(0, result_shape):
+        shift = 0
+        region_idx = index_to_coords(lidx, region_shape)
+        for c in range(ndim):
+            shift += region_idx[c] * array_strides[c]
+        result[lidx] = shift
+    return result
+
+
+@nb.jit
+def reduce(arr, region_shape: Tuple[int], reduction, num_reductions):
+    array_shape = np.array(arr.shape)
+    region_shape = np.array(region_shape)
+    region_size = np.prod(region_shape)
+    flat = arr.ravel()
+    stencil = create_stencil(array_shape, region_shape)
+
+    partitions = np.zeros(num_reductions, dtype="int")
+    partitions[0] = len(flat) // region_size
+
+    for n in range(1, num_reductions):
+        partitions[n] = partitions[n - 1] // region_size
+
+    output = np.zeros(partitions.sum(), dtype=arr.dtype)
+
+    region_grid_shape = array_shape // region_shape
+    array_strides = make_strides(array_shape)
+    region_grid_strides = array_strides * region_shape
+
+    for idx in range(partitions[0]):
+        region_coord = index_to_coords(idx, region_grid_shape)
+        stencil_shift = (region_coord * region_grid_strides).sum()
+        output[idx] = reduction(flat[stencil + stencil_shift])
+
+    return output
+
+@nb.jit()
+def mode_nb(v):
+    sorted = np.sort(v)
+    local_frequency = 1
+    candidate_frequency = 1
+    local_mode = sorted[0]
+    candidate_mode = sorted[0]
+
+    for index in range(1, len(v)):
+        if sorted[index] == local_mode:
+            local_frequency += 1
+        else:
+            local_frequency = 1
+            local_mode = sorted[index]
+        
+        if local_frequency >= candidate_frequency:
+            candidate_frequency = local_frequency
+            candidate_mode = local_mode
+        if candidate_frequency >= len(v) // 2:
+            return candidate_mode
+    return candidate_mode
+
 def downsample_save_chunk_mode(
         source: zarr.Array, 
         dest: zarr.Array, 

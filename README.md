@@ -4,6 +4,7 @@ to create multiscale, first install poetry project and python dependencies:
 
 Input format:
 zarr group with ome-ngff metadata
+
 array naming within group: ``sN`` - where N is the resolution level
 
 run script using cli:

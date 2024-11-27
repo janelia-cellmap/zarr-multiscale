@@ -13,6 +13,9 @@ from toolz import partition_all
 from dask_jobqueue import LSFCluster
 import click
 import sys
+import csv
+import time 
+
 
 def upscale_slice(slc: slice, factor: int):
     """
@@ -72,7 +75,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
     base_scale = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][0]['scale']
     base_trans = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][1]['translation']
     
-    client.cluster.scale(num_workers)
+    #client.cluster.scale(num_workers)
     
     level = 1
     source_shape = z_root[f's{level-1}'].shape
@@ -131,15 +134,13 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
     z_root.attrs['multiscales'] = z_attrs['multiscales']
         
 @click.command()
-@click.option('--src','-s',type=click.Path(exists = True),help='Input .zarr file location.')
+@click.option('--src_batch', '-sb', type=click.Path(exists=True), help='Input csv list of file paths to zarr groups where multi-scale pyramids would be generated.')
+@click.option('--src','-s', type=click.Path(exists = True),help='Input .zarr file location.')
 @click.option('--workers','-w',default=100,type=click.INT,help = "Number of dask workers")
 @click.option('--data_origin','-do',type=click.STRING,help='Different data requires different type of interpolation. Raw fibsem data - use \'raw\', for segmentations - use \'segmentations\'')
 @click.option('--cluster', '-c', default='' ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
-def cli(src, workers, data_origin, cluster):
-    
-    src_store = zarr.NestedDirectoryStore(src)
-    src_root = zarr.open_group(store=src_store, mode = 'a')
-    
+def cli(src_batch, src, workers, data_origin, cluster):
+    print(src)
     if cluster == '':
         print('Did not specify which instance of the dask client to use!')
         sys.exit(0)
@@ -162,8 +163,35 @@ def cli(src, workers, data_origin, cluster):
     with open(os.path.join(os.getcwd(), "dask_dashboard_link" + ".txt"), "w") as text_file:
         text_file.write(str(client.dashboard_link))
     print(client.dashboard_link)
+    
+    src_groups = []
+    if src==None:
+        with open(src_batch, mode ='r')as file:
+            csvFile = csv.reader(file)
+            for lines in csvFile:
+                src_groups.append(lines[0])
+        src_name = src_batch.split('/')[-1].split('.')[0]
+    else:
+        src_groups.append(src)
+        src_name = src.split('/')[-1].split('.')[0]
+        
+    print(src_groups)
+    client.cluster.scale(workers)
 
-    create_multiscale(z_root=src_root, client=client, num_workers=workers, data_origin=data_origin)
+    for src_group_path in src_groups:
+        print(src_group_path)
+        src_store = zarr.NestedDirectoryStore(src_group_path)
+        src_root = zarr.open_group(store=src_store, mode = 'a')
+        try:
+            create_multiscale(z_root=src_root, client=client, num_workers=workers, data_origin=data_origin)
+            with open(f"/logs/dask_log_{src_name}.txt", 'a') as file_log:
+                file_log.write(f'SUCCEEDED:{time.time()}: {src_group_path} \n')
+        except:
+            with open(f"/logs/dask_log_{src_name}.txt", 'a') as file_log:
+                file_log.write(f'FAILED:{time.time()}: {src_group_path} \n')
+        
+    client.cluster.scale(0)
+
     
 if __name__ == '__main__':
     cli()

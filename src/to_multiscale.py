@@ -54,7 +54,7 @@ def downsample_save_chunk_mode(
             ds_data = windowed_mean(source_data, window_size=downsampling_factors)
         
         dest[out_slices] = ds_data
-    return 1
+    return 0
 
 def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data_origin: str):
     

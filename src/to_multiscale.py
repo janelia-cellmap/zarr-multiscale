@@ -59,7 +59,7 @@ def downsample_save_chunk_mode(
 def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data_origin: str):
     
     """
-    Creates multiscale pyramid and writes corresponding metadata into .zattrs 
+    Creates multiscale pyramid and write corresponding metadata into .zattrs 
 
     Args:
         z_root : parent group for source zarr array

@@ -115,7 +115,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
             
         # calculate scale and transalation for n-th scale 
         sn = [dim * pow(2, level) for dim in base_scale]
-        trn = [(dim * (pow(2, level - 1) -0.5))+tr for (dim, tr) in zip(base_scale, base_trans)]
+        trn = [round((dim * (pow(2, level - 1) -0.5))+tr, 3) for (dim, tr) in zip(base_scale, base_trans)]
 
         # store scale, translation
         z_attrs['multiscales'][0]['datasets'].append({'coordinateTransformations': [{"type": "scale",

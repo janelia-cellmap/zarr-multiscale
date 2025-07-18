@@ -54,12 +54,12 @@ def downsample_save_chunk_mode(
             ds_data = windowed_mean(source_data, window_size=downsampling_factors)
         
         dest[out_slices] = ds_data
-    return 1
+    return 0
 
 def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
     
     """
-    Creates multiscale pyramid and writes corresponding metadata into .zattrs 
+    Creates multiscale pyramid and write corresponding metadata into .zattrs 
 
     Args:
         z_root : parent group for source zarr array

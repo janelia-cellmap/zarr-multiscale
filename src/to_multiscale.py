@@ -150,7 +150,8 @@ def cli(src, workers, data_origin, cluster):
             ncpus=num_cores,
             mem=15 * num_cores,
             walltime="48:00",
-            local_directory = "/scratch/$USER/"
+            local_directory = "/scratch/$USER/",
+            death_timeout = 240.0
             )
     
     elif cluster == 'local':

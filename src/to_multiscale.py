@@ -56,7 +56,7 @@ def downsample_save_chunk_mode(
         dest[out_slices] = ds_data
     return 1
 
-def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data_origin: str):
+def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
     
     """
     Creates multiscale pyramid and writes corresponding metadata into .zattrs 
@@ -71,9 +71,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, num_workers: int, data
     z_attrs = z_root.attrs.asdict() 
     base_scale = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][0]['scale']
     base_trans = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][1]['translation']
-    
-    client.cluster.scale(num_workers)
-    
+        
     level = 1
     source_shape = z_root[f's{level-1}'].shape
     
@@ -163,7 +161,8 @@ def cli(src, workers, data_origin, cluster):
         text_file.write(str(client.dashboard_link))
     print(client.dashboard_link)
 
-    create_multiscale(z_root=src_root, client=client, num_workers=workers, data_origin=data_origin)
+    client.cluster.scale(workers)
+    create_multiscale(z_root=src_root, client=client, data_origin=data_origin)
     
 if __name__ == '__main__':
     cli()

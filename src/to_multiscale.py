@@ -1,7 +1,7 @@
 import os
 from typing import Tuple
-from xarray_multiscale import multiscale, windowed_mean, windowed_mode
-from xarray_multiscale.reducers import windowed_mode_countless, windowed_mode_scipy
+from xarray_multiscale import windowed_mean, windowed_mode
+#from xarray_multiscale.reducers import windowed_mode_countless, windowed_mode_scipy
 import dask.array as da
 import zarr
 import time
@@ -13,6 +13,7 @@ from toolz import partition_all
 from dask_jobqueue import LSFCluster
 import click
 import sys
+import math
 
 def upscale_slice(slc: slice, factor: int):
     """
@@ -74,30 +75,27 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
         
     level = 1
     source_shape = z_root[f's{level-1}'].shape
-    
-    # continue downsampling if output array dimensions > 32 
-    while all([dim > 32 for dim in source_shape]):
-        print(source_shape)
+    axes_order = [axis['name'].lower() for axis in z_attrs['multiscales'][0]['axes']]
+    scaling_factors = [ 1 if axis in ['c', 't'] else 2 for axis in axes_order]
+    spatial_shape = [source_shape[dim] for dim, scaling in enumerate(scaling_factors) if scaling == 2]
+    #continue downsampling if output array dimensions > 32 
+    while all([dim > 32 for dim in spatial_shape]):
         print(f'{level=}')
         source_arr = z_root[f's{level-1}']
-        source_darr = da.from_array(source_arr, chunks=(-1,-1,-1))
         
-        if data_origin == 'segmentations':
-            res_level_template = multiscale(source_darr, windowed_mode, 2)[1].data
-        elif data_origin == 'raw':
-            res_level_template = multiscale(source_darr, windowed_mean, 2)[1].data
+        dest_shape = [math.floor(dim / scaling) for dim, scaling in zip(source_arr.shape, scaling_factors)]
 
         # initialize output array
         dest_arr = z_root.require_dataset(
             f's{level}', 
-            shape=res_level_template.shape, 
+            shape=dest_shape, 
             chunks=source_arr.chunks, 
-            dtype=res_level_template.dtype, 
+            dtype=source_arr.dtype, 
             compressor=source_arr.compressor, 
             dimension_separator='/',
             fill_value=0,
             exact=True)
-        
+                
         assert dest_arr.chunks == source_arr.chunks
         out_slices = slices_from_chunks(normalize_chunks(source_arr.chunks, shape=dest_arr.shape))
         
@@ -106,7 +104,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
         for idx, part in enumerate(out_slices_partitioned):
             print(f'{idx + 1} / {len(out_slices_partitioned)}')
             start = time.time()
-            fut = client.map(lambda v: downsample_save_chunk_mode(source_arr, dest_arr, v, (2,2,2), data_origin), part)
+            fut = client.map(lambda v: downsample_save_chunk_mode(source_arr, dest_arr, v, scaling_factors, data_origin), part)
             print(f'Submitted {len(part)} tasks to the scheduler in {time.time()- start}s')
             
             # wait for all the futures to complete
@@ -114,8 +112,9 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
             print(f'Completed {len(part)} tasks in {time.time() - start}s')
             
         # calculate scale and transalation for n-th scale 
-        sn = [dim * pow(2, level) for dim in base_scale]
-        trn = [round((dim * (pow(2, level - 1) -0.5))+tr, 3) for (dim, tr) in zip(base_scale, base_trans)]
+        sn = [dim * pow(2, level) if scaling==2 else dim for dim, scaling in zip(base_scale, scaling_factors)]
+        trn = [round((dim * (pow(2, level - 1) -0.5))+tr, 3) if scaling==2 else tr
+               for (dim, tr, scaling) in zip(base_scale, base_trans, scaling_factors)]
 
         # store scale, translation
         z_attrs['multiscales'][0]['datasets'].append({'coordinateTransformations': [{"type": "scale",
@@ -123,9 +122,9 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
                     'path': f's{level}'})
         
         level += 1
-        source_shape = res_level_template.shape
+        spatial_shape = [dest_shape[dim] for dim, scaling in enumerate(scaling_factors) if scaling == 2]
     
-    # write multiscale metadata into .zattrs
+    #write multiscale metadata into .zattrs
     z_root.attrs['multiscales'] = z_attrs['multiscales']
         
 @click.command()
@@ -133,7 +132,9 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
 @click.option('--workers','-w',default=100,type=click.INT,help = "Number of dask workers")
 @click.option('--data_origin','-do',type=click.STRING,help='Different data requires different type of interpolation. Raw fibsem data - use \'raw\', for segmentations - use \'segmentations\'')
 @click.option('--cluster', '-c', default='' ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
-def cli(src, workers, data_origin, cluster):
+@click.option('--log_dir', default = None, type=click.STRING,
+    help="The path of the parent directory for all LSF worker logs.  Omit if you want worker logs to be emailed to you.")
+def cli(src, workers, data_origin, cluster, log_dir):
     
     src_store = zarr.NestedDirectoryStore(src)
     src_root = zarr.open_group(store=src_store, mode = 'a')
@@ -151,7 +152,8 @@ def cli(src, workers, data_origin, cluster):
             mem=15 * num_cores,
             walltime="48:00",
             local_directory = "/scratch/$USER/",
-            death_timeout = 240.0
+            death_timeout = 240.0,
+            log_directory = log_dir
             )
     
     elif cluster == 'local':

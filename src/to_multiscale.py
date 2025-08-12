@@ -132,7 +132,9 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
 @click.option('--workers','-w',default=100,type=click.INT,help = "Number of dask workers")
 @click.option('--data_origin','-do',type=click.STRING,help='Different data requires different type of interpolation. Raw fibsem data - use \'raw\', for segmentations - use \'segmentations\'')
 @click.option('--cluster', '-c', default='' ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
-def cli(src, workers, data_origin, cluster):
+@click.option('--log_dir', default = None, type=click.STRING,
+    help="The path of the parent directory for all LSF worker logs.  Omit if you want worker logs to be emailed to you.")
+def cli(src, workers, data_origin, cluster, log_dir):
     
     src_store = zarr.NestedDirectoryStore(src)
     src_root = zarr.open_group(store=src_store, mode = 'a')
@@ -150,7 +152,8 @@ def cli(src, workers, data_origin, cluster):
             mem=15 * num_cores,
             walltime="48:00",
             local_directory = "/scratch/$USER/",
-            death_timeout = 240.0
+            death_timeout = 240.0,
+            log_directory = log_dir
             )
     
     elif cluster == 'local':

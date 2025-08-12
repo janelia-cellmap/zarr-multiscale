@@ -83,7 +83,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
         print(f'{level=}')
         source_arr = z_root[f's{level-1}']
         
-        dest_shape = [math.ceil(dim / scaling) for dim, scaling in zip(source_arr.shape, scaling_factors)]
+        dest_shape = [math.floor(dim / scaling) for dim, scaling in zip(source_arr.shape, scaling_factors)]
 
         # initialize output array
         dest_arr = z_root.require_dataset(

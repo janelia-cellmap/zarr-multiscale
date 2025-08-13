@@ -10,11 +10,11 @@ python = "^3.11"
 bokeh = "^3.3.2"
 xarray-multiscale = "^2.1.0"
 numpy = "^1.26.2"
-zarr = "^2.16.1"
+zarr = "^2.18.3"
 dask = {extras = ["distributed"], version = "^2023.12.0"}
 dask-jobqueue = "0.8.2"
 tifffile = "^2023.12.9"
-numcodecs = "^0.12.1"
+numcodecs = "^0.15.1"
 numba = "^0.59.0"
 
 

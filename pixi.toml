@@ -2,7 +2,7 @@
 name = "zarr-multiscale"
 version = "0.1.0"
 description = ""
-authors = ["Yurii Zubov zubov452@gmail.com"]
+authors = ["Yurii Zubov <zubov452@gmail.com>"]
 readme = "README.md"
 channels = ["conda-forge"]
 platforms = ["linux-64"]

@@ -1,9 +1,4 @@
 
-run script using cli:
-
-3. ``poetry run python3 src/to_multiscale.py  --workers=NUMBER_OF_DASK_WORKERS --data_origin=raw/segmentations --cluster=lsf/local --src=PATH_TO_ZARR_GROUP_WITH_OME-NGFF_METADATA``
-
-
 ## Installation
 
 ```bash

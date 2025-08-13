@@ -3,3 +3,4 @@ dask_dashboard_link.txt
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+__pycache__/

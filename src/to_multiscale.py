@@ -14,6 +14,8 @@ import click
 import sys
 import math
 import scipy.ndimage as ndi
+from dask_utils import initialize_dask_client
+
 
 def upscale_slice(slc: slice, factor: int):
     """
@@ -139,7 +141,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str, anti
 @click.option('--src','-s',type=click.Path(exists = True),help='Input .zarr file location.')
 @click.option('--workers','-w',default=100,type=click.INT,help = "Number of dask workers")
 @click.option('--data_origin','-do',type=click.STRING,help='Different data requires different type of interpolation. Raw fibsem data - use \'raw\', for segmentations - use \'segmentations\'')
-@click.option('--cluster', '-c', default='' ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
+@click.option('--cluster', '-c', default=None ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
 @click.option('--log_dir', default = None, type=click.STRING,
     help="The path of the parent directory for all LSF worker logs.  Omit if you want worker logs to be emailed to you.")
 @click.option('--antialiasing', '-aa', default=False, type=click.BOOL, help='Reduce aliasing of the image by blurring it with Gaussian filter before downsampling. Default: False')
@@ -148,30 +150,7 @@ def cli(src, workers, data_origin, cluster, log_dir, antialiasing):
     src_store = zarr.NestedDirectoryStore(src)
     src_root = zarr.open_group(store=src_store, mode = 'a')
     
-    if cluster == '':
-        print('Did not specify which instance of the dask client to use!')
-        sys.exit(0)
-    elif cluster == 'lsf':
-        num_cores = 1
-        cluster = LSFCluster(
-            cores=num_cores,
-            processes=num_cores,
-            memory=f"{15 * num_cores}GB",
-            ncpus=num_cores,
-            mem=15 * num_cores,
-            walltime="48:00",
-            local_directory = "/scratch/$USER/",
-            death_timeout = 240.0,
-            log_directory = log_dir
-            )
-    
-    elif cluster == 'local':
-            cluster = LocalCluster()
-    
-    client = Client(cluster)
-    with open(os.path.join(os.getcwd(), "dask_dashboard_link" + ".txt"), "w") as text_file:
-        text_file.write(str(client.dashboard_link))
-    print(client.dashboard_link)
+    client = initialize_dask_client(cluster_type=cluster, log_dir=log_dir)
 
     client.cluster.scale(workers)
     create_multiscale(z_root=src_root, client=client, data_origin=data_origin, antialiasing=antialiasing)

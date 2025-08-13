@@ -2,7 +2,6 @@ import os
 from typing import Tuple
 from xarray_multiscale import windowed_mean, windowed_mode
 #from xarray_multiscale.reducers import windowed_mode_countless, windowed_mode_scipy
-import dask.array as da
 import zarr
 import time
 from numcodecs.abc import Codec
@@ -14,6 +13,7 @@ from dask_jobqueue import LSFCluster
 import click
 import sys
 import math
+import scipy.ndimage as ndi
 
 def upscale_slice(slc: slice, factor: int):
     """
@@ -32,7 +32,8 @@ def downsample_save_chunk_mode(
         dest: zarr.Array, 
         out_slices: Tuple[slice, ...],
         downsampling_factors: Tuple[int, ...],
-        data_origin: str):
+        data_origin: str,
+        antialiasing : bool):
     
     """
     Downsamples source array slice and writes into destination array. 
@@ -52,12 +53,19 @@ def downsample_save_chunk_mode(
         if data_origin == 'segmentations':
             ds_data = windowed_mode(source_data, window_size=downsampling_factors)
         elif data_origin == 'raw':
-            ds_data = windowed_mean(source_data, window_size=downsampling_factors)
-        
+            if antialiasing:
+                # blur data in chunk before downsampling to reduce aliasing of the image 
+                # conservative Gaussian blur coeff: 2/2.5 = 0.8
+                sigma = [0 if factor == 1 else factor/2.5 for factor in downsampling_factors]
+                filtered_data = ndi.gaussian_filter(source_data, sigma=sigma)
+                ds_data = windowed_mean(filtered_data, window_size=downsampling_factors)
+            else:
+                ds_data = windowed_mean(source_data, window_size=downsampling_factors)
+
         dest[out_slices] = ds_data
     return 0
 
-def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
+def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str, antialiasing : bool):
     
     """
     Creates multiscale pyramid and write corresponding metadata into .zattrs 
@@ -104,7 +112,7 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
         for idx, part in enumerate(out_slices_partitioned):
             print(f'{idx + 1} / {len(out_slices_partitioned)}')
             start = time.time()
-            fut = client.map(lambda v: downsample_save_chunk_mode(source_arr, dest_arr, v, scaling_factors, data_origin), part)
+            fut = client.map(lambda v: downsample_save_chunk_mode(source_arr, dest_arr, v, scaling_factors, data_origin, antialiasing), part)
             print(f'Submitted {len(part)} tasks to the scheduler in {time.time()- start}s')
             
             # wait for all the futures to complete
@@ -134,7 +142,8 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str):
 @click.option('--cluster', '-c', default='' ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
 @click.option('--log_dir', default = None, type=click.STRING,
     help="The path of the parent directory for all LSF worker logs.  Omit if you want worker logs to be emailed to you.")
-def cli(src, workers, data_origin, cluster, log_dir):
+@click.option('--antialiasing', '-aa', default=False, type=click.BOOL, help='Reduce aliasing of the image by blurring it with Gaussian filter before downsampling. Default: False')
+def cli(src, workers, data_origin, cluster, log_dir, antialiasing):
     
     src_store = zarr.NestedDirectoryStore(src)
     src_root = zarr.open_group(store=src_store, mode = 'a')
@@ -165,7 +174,7 @@ def cli(src, workers, data_origin, cluster, log_dir):
     print(client.dashboard_link)
 
     client.cluster.scale(workers)
-    create_multiscale(z_root=src_root, client=client, data_origin=data_origin)
+    create_multiscale(z_root=src_root, client=client, data_origin=data_origin, antialiasing=antialiasing)
     
 if __name__ == '__main__':
     cli()

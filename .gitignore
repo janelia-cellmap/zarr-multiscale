@@ -1,2 +1,5 @@
 dask_dashboard_link.txt
-/.vscode
+.vscode/
+# pixi environments
+.pixi/*
+!.pixi/config.toml

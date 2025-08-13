@@ -1,15 +1,16 @@
 import pytest
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 import sys
 import os
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+from dask_utils import initialize_dask_client
 from to_multiscale import (
     upscale_slice, 
     downsample_save_chunk_mode,
-    create_multiscale
+    create_multiscale,
 )
 
 
@@ -118,9 +119,6 @@ class TestDownsampleSaveChunkMode:
 @pytest.fixture
 def multiscale_result(temp_zarr_array):
     """Create a multiscale zarr array and return the result for testing."""
-    from unittest.mock import patch
-    from to_multiscale import create_multiscale
-    from dask_utils import initialize_dask_client
     
     z_root, temp_dir = temp_zarr_array
     

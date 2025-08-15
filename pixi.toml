@@ -17,6 +17,7 @@ numcodecs = ">=0.15.1,<0.16.1"
 click = ">=8.1.8,<9.0.0"
 scipy = ">=1.16.1"
 pytest = "*"
+pydantic = ">=2.11.7,<3"
 
 [pypi-dependencies]
 xarray-multiscale = ">=2.1.0"

@@ -77,7 +77,7 @@ def get_downsampling_factors(shape, axes_order, min_ratio=0.5, max_ratio=2.0, hi
         List of downsampling factors
     """
     if high_aspect_ratio==False:
-        return [ 1 if axis in ['c', 't'] else 2 for axis in axes_order]
+        return tuple( 1 if axis in ['c', 't'] else 2 for axis in axes_order)
     else:
         # Get spatial dimensions (skip channel and time)
         spatial_dims = list((axis, shape[i]) for i, axis in enumerate(axes_order) if axis not in ['c', 't'])

@@ -11,7 +11,7 @@ def temp_zarr_array():
     temp_dir = tempfile.mkdtemp()
     
     # Create a simple 4D test array (C, Z, Y, X)
-    test_data = np.random.randint(0, 255, size=(2, 64, 128, 128), dtype=np.uint8)
+    test_data = np.random.randint(0, 255, size=(2, 63, 128, 128), dtype=np.uint8)
     
     store = zarr.DirectoryStore(temp_dir)
     root = zarr.group(store=store)

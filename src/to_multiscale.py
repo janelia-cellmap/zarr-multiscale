@@ -1,21 +1,17 @@
 import os
-from typing import Tuple
+from typing import Tuple, List
 from xarray_multiscale import windowed_mean, windowed_mode
 #from xarray_multiscale.reducers import windowed_mode_countless, windowed_mode_scipy
 import zarr
 import time
-from numcodecs.abc import Codec
 from dask.array.core import slices_from_chunks, normalize_chunks
-from dask.distributed import Client, wait, LocalCluster
-from numcodecs import Zstd
+from dask.distributed import Client, wait
 from toolz import partition_all
-from dask_jobqueue import LSFCluster
 import click
-import sys
 import math
 import scipy.ndimage as ndi
 from dask_utils import initialize_dask_client
-
+from pydantic_models import validate_config
 
 def upscale_slice(slc: slice, factor: int):
     """
@@ -67,8 +63,62 @@ def downsample_save_chunk_mode(
         dest[out_slices] = ds_data
     return 0
 
-def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str, antialiasing : bool):
+def get_downsampling_factors(shape, axes_order, min_ratio=0.5, max_ratio=2.0, high_aspect_ratio=False):
+    """
+    Calculate adaptive downsampling factors based on aspect ratios.
     
+    Args:
+        shape: Array shape (c, z, y, x)
+        axes_order: List of axis names ['c', 'z', 'y', 'x']
+        min_ratio: Minimum allowed ratio (default 0.5)
+        max_ratio: Maximum allowed ratio (default 2.0)
+    
+    Returns:
+        List of downsampling factors
+    """
+    if high_aspect_ratio==False:
+        return tuple( 1 if axis in ['c', 't'] else 2 for axis in axes_order)
+    else:
+        # Get spatial dimensions (skip channel and time)
+        spatial_dims = list((axis, shape[i]) for i, axis in enumerate(axes_order) if axis not in ['c', 't'])
+        
+        axes, dimensions = zip(*spatial_dims)
+    
+        if len(dimensions) == 1:
+            factors = [2]
+        else:
+            ratios = []
+            for i, dim in enumerate(dimensions):
+                # Calculate ratios of current dimension to all others
+                # for example for 3D:  [(z/y, z/x),(y/z, y/x),(x/z, x/y)]
+                dim_ratios = tuple(dim / dimensions[j] for j in range(len(dimensions)) if j != i)
+                ratios.append(dim_ratios)
+            
+            # Determine downsampling factors for each spatial dimension
+            factors = []
+            for (i,dim_ratios) in enumerate(ratios):
+                # Check if both ratios are within acceptable range
+                if all(ratio >= max_ratio for ratio in dim_ratios):
+                    factors = [1,]*len(ratios)
+                    factors[i] = 2
+                    break
+                elif all(ratio <= min_ratio for ratio in dim_ratios):
+                    factors = [2,]*len(ratios)
+                    factors[i] = 1
+                    break
+                else:
+                    factors.append(2)
+        
+        spatial_factors = {k : v for k,v in zip(axes, factors)}
+        return tuple(1 if axis in ['c', 't'] else spatial_factors[axis] for axis in axes_order)
+
+def create_multiscale(z_root: zarr.Group,
+                      client: Client,
+                      data_origin: str,
+                      antialiasing : bool,
+                      high_aspect_ratio : bool,
+                      custom_scale_factors : List[List[float]]
+                      ):
     """
     Creates multiscale pyramid and write corresponding metadata into .zattrs 
 
@@ -80,19 +130,24 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str, anti
     """
     # store original array in a new .zarr file as an arr_name scale
     z_attrs = z_root.attrs.asdict() 
-    base_scale = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][0]['scale']
-    base_trans = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][1]['translation']
+    scn_level_up = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][0]['scale']
+    trn_level_up = z_attrs['multiscales'][0]['datasets'][0]['coordinateTransformations'][1]['translation']
         
     level = 1
     source_shape = z_root[f's{level-1}'].shape
     axes_order = [axis['name'].lower() for axis in z_attrs['multiscales'][0]['axes']]
-    scaling_factors = [ 1 if axis in ['c', 't'] else 2 for axis in axes_order]
-    spatial_shape = [source_shape[dim] for dim, scaling in enumerate(scaling_factors) if scaling == 2]
+    spatial_shape = list(source_shape[i] for i, axis in enumerate(axes_order) if axis not in ['c', 't'])
+    
     #continue downsampling if output array dimensions > 32 
-    while all([dim > 32 for dim in spatial_shape]):
+    while all([dim > 16 for dim in spatial_shape]):
         print(f'{level=}')
         source_arr = z_root[f's{level-1}']
         
+        if custom_scale_factors:
+            scaling_factors = tuple(int(sc_cur/sc_prev) for sc_prev, sc_cur in zip(custom_scale_factors[level-1], custom_scale_factors[level]))
+        else:
+            scaling_factors = get_downsampling_factors(source_arr.shape, axes_order, high_aspect_ratio=high_aspect_ratio)
+
         dest_shape = [math.floor(dim / scaling) for dim, scaling in zip(source_arr.shape, scaling_factors)]
 
         # initialize output array
@@ -121,39 +176,67 @@ def create_multiscale(z_root: zarr.Group, client: Client, data_origin: str, anti
             result = wait(fut)
             print(f'Completed {len(part)} tasks in {time.time() - start}s')
             
-        # calculate scale and transalation for n-th scale 
-        sn = [dim * pow(2, level) if scaling==2 else dim for dim, scaling in zip(base_scale, scaling_factors)]
-        trn = [round((dim * (pow(2, level - 1) -0.5))+tr, 3) if scaling==2 else tr
-               for (dim, tr, scaling) in zip(base_scale, base_trans, scaling_factors)]
+        # calculate scale and transalation for n-th scale
+        sn = [sc*sn_prev for sn_prev, sc in zip(scn_level_up, scaling_factors)]
+        trn = [(sc -1)*sn_prev/(sc) + trn_prev for sn_prev, trn_prev, sc
+               in zip(scn_level_up, trn_level_up, scaling_factors)]
+                
+        # Convert datasets list to dict for easier lookup/replacement
+        datasets = z_attrs['multiscales'][0]['datasets']
+        datasets_dict = {d['path']: d for d in datasets}
 
-        # store scale, translation
-        z_attrs['multiscales'][0]['datasets'].append({'coordinateTransformations': [{"type": "scale",
-                    "scale": sn}, {"type" : "translation", "translation" : trn}],
-                    'path': f's{level}'})
+        # Update or add
+        datasets_dict[f's{level}'] = {
+            'coordinateTransformations': [
+                {"type": "scale", "scale": sn}, 
+                {"type": "translation", "translation": trn}
+            ],
+            'path': f's{level}'
+        }
+        # Convert back to list (maintaining order)
+        z_attrs['multiscales'][0]['datasets'] = list(datasets_dict.values())
         
+        #prepare data for downsampling next level
         level += 1
-        spatial_shape = [dest_shape[dim] for dim, scaling in enumerate(scaling_factors) if scaling == 2]
+        scn_level_up = sn
+        trn_level_up = trn
+        spatial_shape = list(dest_shape[i] for i, axis in enumerate(axes_order) if axis not in ['c', 't'])
     
     #write multiscale metadata into .zattrs
     z_root.attrs['multiscales'] = z_attrs['multiscales']
         
 @click.command()
+@click.option('--config', '-c', type=click.Path(exists=True), help='Configuration file path')
 @click.option('--src','-s',type=click.Path(exists = True),help='Input .zarr file location.')
-@click.option('--workers','-w',default=100,type=click.INT,help = "Number of dask workers")
+@click.option('--workers','-w',type=click.INT, help = "Number of dask workers")
 @click.option('--data_origin','-do',type=click.STRING,help='Different data requires different type of interpolation. Raw fibsem data - use \'raw\', for segmentations - use \'segmentations\'')
-@click.option('--cluster', '-c', default=None ,type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
-@click.option('--log_dir', default = None, type=click.STRING,
+@click.option('--cluster', '-cl',type=click.STRING, help="Which instance of dask client to use. Local client - 'local', cluster 'lsf'")
+@click.option('--log_dir', type=click.STRING,
     help="The path of the parent directory for all LSF worker logs.  Omit if you want worker logs to be emailed to you.")
-@click.option('--antialiasing', '-aa', default=False, type=click.BOOL, help='Reduce aliasing of the image by blurring it with Gaussian filter before downsampling. Default: False')
-def cli(src, workers, data_origin, cluster, log_dir, antialiasing):
+@click.option('--antialiasing', '-aa', type=click.BOOL, help='Reduce aliasing of the image by blurring it with Gaussian filter before downsampling. Default: False')
+@click.option('--high_aspect_ratio', '--har', type=click.BOOL, help='Reduce aspect ratio of the data array more and more with each downsampling level. Metadata in zattrs is being recomputed accordingly. Default: False.')
+@click.option('--project_name', '-p', type=click.STRING, help='specify project name when running on an LSF cluster.')
+def cli(config, **kwargs):
     
-    src_store = zarr.NestedDirectoryStore(src)
-    src_root = zarr.open_group(store=src_store, mode = 'a')
+    if config:
+        config_dict = validate_config(config, **kwargs)
+    else:
+        config_dict = {k: v for k, v in kwargs.items() if v is not None}
     
-    client = initialize_dask_client(cluster_type=cluster, log_dir=log_dir)
+    #src_store = zarr.NestedDirectoryStore(config_dict['src'])
+    src_root = zarr.open_group(config_dict['src'], mode = 'a')
 
-    client.cluster.scale(workers)
-    create_multiscale(z_root=src_root, client=client, data_origin=data_origin, antialiasing=antialiasing)
+    client = initialize_dask_client(cluster_type=config_dict['cluster'],
+                                    log_dir=config_dict.get('log_dir', None),
+                                    job_extra_directives=[f'-P {config_dict["project_name"]}'])
+    client.cluster.scale(int(config_dict['workers']))
+    create_multiscale(z_root=src_root,
+                      client=client,
+                      data_origin=config_dict['data_origin'],
+                      antialiasing=config_dict.get('antialiasing', False),
+                      high_aspect_ratio=config_dict.get('high_aspect_ratio', False),
+                      custom_scale_factors = config_dict.get('custom_scale_factors', None)
+                      )
     
 if __name__ == '__main__':
     cli()

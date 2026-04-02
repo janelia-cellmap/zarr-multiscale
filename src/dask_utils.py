@@ -3,9 +3,11 @@ from dask.distributed import Client, LocalCluster
 import os
 import sys
 import logging
+from typing import List
 
-
-def initialize_dask_client(cluster_type: str | None = None, log_dir: str = None) -> Client:
+def initialize_dask_client(cluster_type: str | None = None,
+                           log_dir: str = None,
+                           job_extra_directives = List[str]) -> Client:
     """Initialize dask client.
 
     Args:
@@ -27,6 +29,7 @@ def initialize_dask_client(cluster_type: str | None = None, log_dir: str = None)
             walltime="48:00",
             log_directory = log_dir,
             local_directory="/scratch/$USER/",
+            job_extra_directives = job_extra_directives
         )
     elif cluster_type == "local":
         cluster = LocalCluster()

@@ -14,6 +14,7 @@ class Config(BaseModel):
     antialiasing: bool = False
     high_aspect_ratio: bool = False
     custom_scale_factors:  Optional[List[List[float]]] = None
+    project_name: str = None
     
     @validator('src')
     def src_must_exist(cls, v):

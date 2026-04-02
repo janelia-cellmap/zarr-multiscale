@@ -139,7 +139,7 @@ def create_multiscale(z_root: zarr.Group,
     spatial_shape = list(source_shape[i] for i, axis in enumerate(axes_order) if axis not in ['c', 't'])
     
     #continue downsampling if output array dimensions > 32 
-    while all([dim > 32 for dim in spatial_shape]):
+    while all([dim > 16 for dim in spatial_shape]):
         print(f'{level=}')
         source_arr = z_root[f's{level-1}']
         
@@ -215,6 +215,7 @@ def create_multiscale(z_root: zarr.Group,
     help="The path of the parent directory for all LSF worker logs.  Omit if you want worker logs to be emailed to you.")
 @click.option('--antialiasing', '-aa', type=click.BOOL, help='Reduce aliasing of the image by blurring it with Gaussian filter before downsampling. Default: False')
 @click.option('--high_aspect_ratio', '--har', type=click.BOOL, help='Reduce aspect ratio of the data array more and more with each downsampling level. Metadata in zattrs is being recomputed accordingly. Default: False.')
+@click.option('--project_name', '-p', type=click.STRING, help='specify project name when running on an LSF cluster.')
 def cli(config, **kwargs):
     
     if config:
@@ -222,11 +223,12 @@ def cli(config, **kwargs):
     else:
         config_dict = {k: v for k, v in kwargs.items() if v is not None}
     
-    src_store = zarr.NestedDirectoryStore(config_dict['src'])
-    src_root = zarr.open_group(store=src_store, mode = 'a')
+    #src_store = zarr.NestedDirectoryStore(config_dict['src'])
+    src_root = zarr.open_group(config_dict['src'], mode = 'a')
 
     client = initialize_dask_client(cluster_type=config_dict['cluster'],
-                                    log_dir=config_dict.get('log_dir', None))
+                                    log_dir=config_dict.get('log_dir', None),
+                                    job_extra_directives=[f'-P {config_dict["project_name"]}'])
     client.cluster.scale(int(config_dict['workers']))
     create_multiscale(z_root=src_root,
                       client=client,
